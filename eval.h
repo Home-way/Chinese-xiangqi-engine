@@ -5,3 +5,4 @@
 
 // 局面评估：红方视角为正（与原版符号约定一致）。纯函数，无副作用。
 int evaluate(const Position& pos);
+ 

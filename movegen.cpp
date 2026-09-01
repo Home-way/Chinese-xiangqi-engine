@@ -30,7 +30,7 @@ void genPseudoMoves(const Position& pos, std::vector<Move>& out) {
       m.capture = map[x][y];
       out.push_back(m);
     }
-  };
+  }; 
 
   for (int man = nb; man <= nk; man++) {
     int mx = pos.manX(man), my = pos.manY(man);

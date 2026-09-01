@@ -242,3 +242,4 @@ int evaluate(const Position& pos) {
   // TODO(W3): 评估函数重构（结构化特征）
   return score;
 }
+  

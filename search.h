@@ -20,3 +20,4 @@ struct SearchInfo {
 
 // 返回最佳着法；无合法着法时返回 {man=EMPTY}（UCCI 层输出 nobestmove）
 Move search(const Position& pos, const SearchConfig& cfg, SearchInfo* info = nullptr);
+ 

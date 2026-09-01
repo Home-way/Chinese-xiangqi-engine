@@ -29,7 +29,7 @@ public:
   // 从中国象棋 FEN（8 段式）设置局面；返回是否成功
   bool fromFen(const char* fen);
 
-  // 内部：从坐标拿子（供 movegen 用）
+  // 内部：从坐标拿子（供 movegen 用） 
   int mapAt(int x, int y) const { return map_[x][y]; }
   // 是否空点
   bool isEmpty(int x, int y) const { return map_[x][y] == EMPTY; }

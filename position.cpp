@@ -301,7 +301,7 @@ bool canGo(const int manmap[11][12], int man, int xfrom, int yfrom, int xto, int
     if (manmap[i][j] != EMPTY) return false;
     break;
   }
-  default: return false;
+  default: return false; 
   }
   return true;
 }

@@ -13,3 +13,4 @@ void genLegalMoves(const Position& pos, std::vector<Move>& out);
 
 // 某方棋子能否攻击到 (tx,ty)（供 inCheck 使用）
 bool canAttack(const Position& pos, int side, int tx, int ty);
+ 

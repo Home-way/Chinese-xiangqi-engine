@@ -1,12 +1,3 @@
-// search.cpp — 搜索实现：迭代加深 + alpha-beta 剪枝 + 着法排序 + 时间控制
-// ============================================================
-// 【改动点总览】
-//   1. negamax() 增加 alpha/beta 窗口参数，实现 beta 剪枝
-//   2. 走法排序：吃子优先（MVV-LVA），用 std::sort 更高效
-//   3. 根层走法排序 + 渴望窗口（Aspiration Window）提升剪枝效率
-//   4. 保留 Top3 候选 + 随机挑选机制
-// ============================================================
-
 #include "search.h"
 #include "movegen.h"
 #include "eval.h"
@@ -14,11 +5,18 @@
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
-#include <algorithm>  // 【优化】用 std::sort 替代手写插入排序
+#include <algorithm>
 
 namespace {
 
-    // 顶层候选（原版前三候选语义简化：取前 3 个 best 用随机挑选）
+    // 历史表启发
+    static int history[32][11][12] = { 0 };
+    const double HISTORY_DECAY = 0.9;
+
+    // 搜索计数器，用于定期衰减历史表（不是清零，而是大幅衰减）
+    static int searchCount = 0;
+    const int DECAY_INTERVAL = 50000;  // 每50000次搜索衰减一次
+
     struct Candidate { Move move; int score; };
 
     int64_t nowMs() {
@@ -26,61 +24,60 @@ namespace {
         return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
     }
 
-    // ============================================================
-    // 【优化】走法排序用的子力价值表
-    // ============================================================
     inline int pieceValueForOrder(int man) {
         if (man == EMPTY) return 0;
         switch (manToType(man)) {
-        case RED_J: case BLACK_J: return 900;   // 车
-        case RED_P: case BLACK_P: return 450;   // 炮
-        case RED_M: case BLACK_M: return 400;   // 马
-        case RED_S: case BLACK_S: return 200;   // 士
-        case RED_X: case BLACK_X: return 200;   // 相
-        case RED_B: case BLACK_B: return 100;   // 兵
-        case RED_K: case BLACK_K: return 10000; // 帅/将
+        case RED_J: case BLACK_J: return 900;
+        case RED_P: case BLACK_P: return 450;
+        case RED_M: case BLACK_M: return 400;
+        case RED_S: case BLACK_S: return 200;
+        case RED_X: case BLACK_X: return 200;
+        case RED_B: case BLACK_B: return 100;
+        case RED_K: case BLACK_K: return 10000;
         default: return 0;
         }
     }
 
-    // ============================================================
-    // 【优化】走法排序函数：吃子走法优先，MVV-LVA 思想
-    // ============================================================
+    // 【优化】走法排序：不用 keys 数组，直接算键
     void sortMoves(Position& pos, std::vector<Move>& moves) {
-        // 为每个走法计算排序键
-        std::vector<int> keys(moves.size());
-        for (size_t i = 0; i < moves.size(); ++i) {
-            int victim = pos.pieceAt(moves[i].toX, moves[i].toY);
-            if (victim == EMPTY) {
-                keys[i] = 0;  // 不吃子排最后
-            }
-            else {
-                // MVV-LVA：被吃子价值 × 10 - 进攻子价值
-                keys[i] = pieceValueForOrder(victim) * 10 - pieceValueForOrder(moves[i].man);
-            }
-        }
-
-        // 用 std::sort 降序排列（比手写插入排序更快）
         std::sort(moves.begin(), moves.end(),
             [&](const Move& a, const Move& b) {
                 int va = pos.pieceAt(a.toX, a.toY);
                 int vb = pos.pieceAt(b.toX, b.toY);
-                // 如果都吃子或都不吃子，按原始顺序（稳定排序不改变相对顺序）
-                if ((va == EMPTY) == (vb == EMPTY)) return false;
-                // 吃子的排在前面
-                if (va != EMPTY && vb == EMPTY) return true;
-                if (va == EMPTY && vb != EMPTY) return false;
-                // 都用 MVV-LVA 排序
-                int ka = (va == EMPTY) ? 0 : pieceValueForOrder(va) * 10 - pieceValueForOrder(a.man);
-                int kb = (vb == EMPTY) ? 0 : pieceValueForOrder(vb) * 10 - pieceValueForOrder(b.man);
+
+                int ka = (va == EMPTY) ?
+                    history[a.man][a.toX][a.toY] :
+                    pieceValueForOrder(va) * 10 - pieceValueForOrder(a.man) +
+                    history[a.man][a.toX][a.toY];
+
+                int kb = (vb == EMPTY) ?
+                    history[b.man][b.toX][b.toY] :
+                    pieceValueForOrder(vb) * 10 - pieceValueForOrder(b.man) +
+                    history[b.man][b.toX][b.toY];
+
                 return ka > kb;
             }
         );
     }
 
-    // ============================================================
-    // 【核心】alpha-beta 剪枝版 negamax（含走法排序 + 渴望窗口支持）
-    // ============================================================
+    // 【优化】衰减单个走法的历史值（用到的才衰减，不用扫全表）
+    inline void decayHistoryForMove(int man, int x, int y) {
+        history[man][x][y] = (int)(history[man][x][y] * HISTORY_DECAY);
+    }
+
+    // 【优化】定期大幅衰减历史表（保留学习成果，防止溢出）
+    inline void decayHistoryTable() {
+        for (int i = 0; i < 32; i++) {
+            for (int j = 0; j < 11; j++) {
+                for (int k = 0; k < 12; k++) {
+                    history[i][j][k] = (int)(history[i][j][k] * 0.5);  // 大幅衰减，不全清零
+                }
+            }
+        }
+        searchCount = 0;
+    }
+
+    // alpha-beta 剪枝版 negamax
     int negamax(Position& pos, int depth, uint64_t& nodeCount, int64_t deadline,
         int stm, int alpha, int beta) {
         nodeCount++;
@@ -96,7 +93,6 @@ namespace {
             return stm == RED ? score : -score;
         }
 
-        // 【优化】走法排序（吃子优先，提升剪枝效率）
         sortMoves(pos, moves);
 
         int best = -20000;
@@ -119,8 +115,13 @@ namespace {
             if (val > best) best = val;
             if (best > alpha) alpha = best;
 
-            // 【剪枝】beta 剪枝
-            if (alpha >= beta) break;
+            if (alpha >= beta) {
+                // 历史表加分
+                history[m.man][m.toX][m.toY] += depth * depth;
+                // 【优化】同时衰减这个位置（避免无限增长）
+                decayHistoryForMove(m.man, m.toX, m.toY);
+                break;
+            }
             if (deadline && nowMs() >= deadline) break;
         }
         return best;
@@ -128,9 +129,7 @@ namespace {
 
 } // namespace
 
-// ============================================================
-// 【优化】search() 主函数：迭代加深 + 渴望窗口 + Top3 候选
-// ============================================================
+// search() 主函数
 Move search(const Position& pos, const SearchConfig& cfg, SearchInfo* info) {
     int64_t t0 = nowMs();
     int64_t deadline = cfg.timeMs > 0 ? t0 + cfg.timeMs : 0;
@@ -138,6 +137,11 @@ Move search(const Position& pos, const SearchConfig& cfg, SearchInfo* info) {
 
     Position cur = pos;
     int stm = cur.sideToMove();
+
+    // 【优化】定期大幅衰减历史表（保留学习成果，防止溢出）
+    if (++searchCount >= DECAY_INTERVAL) {
+        decayHistoryTable();
+    }
 
     std::vector<Move> legal;
     genLegalMoves(cur, legal);
@@ -154,21 +158,16 @@ Move search(const Position& pos, const SearchConfig& cfg, SearchInfo* info) {
     std::vector<Candidate> top;
     top.reserve(3);
 
-    // 【优化】根层走法排序（先搜好走法，快速找到好的 alpha 值）
     sortMoves(cur, legal);
 
-    int prevScore = 0;  // 上一层的分数，用于渴望窗口
+    int prevScore = 0;
 
     for (int d = 1; d <= maxDepth; d++) {
-        // 【优化】渴望窗口（Aspiration Window）
-        // 用上一层的分数作为基准，缩小搜索窗口，提升剪枝效率
-        // 如果窗口搜索失败，再用全窗口重新搜索
-        int windowSize = 50;  // 窗口大小，可调
+        int windowSize = 50;
         int alpha = prevScore - windowSize;
         int beta = prevScore + windowSize;
         bool windowFailed = false;
 
-        // 尝试用渴望窗口搜索
         for (const Move& m : legal) {
             Position pm = cur;
             if (!pm.makeMove(m)) continue;
@@ -177,15 +176,12 @@ Move search(const Position& pos, const SearchConfig& cfg, SearchInfo* info) {
             int val = -negamax(pm, d - 1, nodes, deadline,
                 stm == RED ? BLACK : RED, alpha, beta);
 
-            // 如果分数落在窗口边界上，说明窗口太小，需要重新搜索
             if (val <= alpha || val >= beta) {
                 windowFailed = true;
-                // 用全窗口重新搜索这个走法
                 val = -negamax(pm, d - 1, nodes, deadline,
                     stm == RED ? BLACK : RED, -20000, 20000);
             }
 
-            // 维护 Top3 候选
             bool inserted = false;
             for (size_t i = 0; i < top.size(); i++) {
                 if (val > top[i].score) {
@@ -200,9 +196,7 @@ Move search(const Position& pos, const SearchConfig& cfg, SearchInfo* info) {
             if (deadline && nowMs() >= deadline) break;
         }
 
-        // 如果渴望窗口失败，用全窗口重新搜索这一层（仅对第一个走法）
         if (windowFailed && top.size() > 0) {
-            // 重新计算第一个走法的精确值
             Move firstMove = top[0].move;
             Position pm = cur;
             if (pm.makeMove(firstMove)) {
@@ -217,7 +211,6 @@ Move search(const Position& pos, const SearchConfig& cfg, SearchInfo* info) {
         if (info) { info->depth = d; info->score = bestScore; }
         if (deadline && nowMs() >= deadline) break;
 
-        // 更新 prevScore，用于下一层的渴望窗口
         prevScore = bestScore;
     }
 
